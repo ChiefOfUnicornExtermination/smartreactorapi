@@ -181,6 +181,7 @@ app.use('/devices',   require('./routes/devices'));
 app.use('/provision', require('./routes/provision'));
 app.use('/firmware',  require('./routes/ota'));
 app.use('/store',     require('./routes/store.js'));
+app.use('/catalog',   require('./routes/catalog'));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Health + debug
