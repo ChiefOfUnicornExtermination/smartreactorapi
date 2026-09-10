@@ -92,56 +92,171 @@ router.get('/mine', authMiddleware, async (req, res) => {
   }
 });
 
-// GET /devices/:deviceId/status
-router.get('/:deviceId/status', async (req, res) => {
-  const { deviceId } = req.params;
+async function findOwnedDevice(req, deviceId) {
   const db = req.app.locals.db;
-  const deviceState = req.app.locals.deviceState;
+  const conn = await db.getConnection();
   try {
-    const conn = await db.getConnection();
-    const device = await conn.query('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    const devices = await conn.query(
+      'SELECT id, name, type, created_at FROM devices WHERE id = ? AND user_id = ?',
+      [deviceId, req.user.user_id]
+    );
+    return devices[0] || null;
+  } finally {
     conn.release();
-    if (!device.length) return res.status(404).json({ error: 'Device not found' });
-    const state = deviceState[deviceId] || {};
-    res.json({
-      device_id: deviceId,
-      device_name: device[0].name,
-      online: state.online === true,
-      light: state.light || 'unknown',
-      motor: state.motor || 'unknown',
-      rgb: state.rgb || 'off',
-      last_seen: state.lastSeen || null
-    });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  }
+}
+
+async function requireOwnedDevice(req, res) {
+  try {
+    const device = await findOwnedDevice(req, req.params.deviceId);
+    if (!device) {
+      res.status(404).json({ error: 'Device not found or not yours' });
+      return null;
+    }
+    return device;
+  } catch (err) {
+    console.error('[DEVICE] Ownership check failed:', err.message);
+    res.status(500).json({ error: 'Could not verify device ownership' });
+    return null;
+  }
+}
+
+// GET /devices/:deviceId/status
+router.get('/:deviceId/status', authMiddleware, async (req, res) => {
+  const device = await requireOwnedDevice(req, res);
+  if (!device) return;
+
+  const deviceState = req.app.locals.deviceState;
+  const state = deviceState[device.id] || {};
+  res.json({
+    device_id: device.id,
+    device_name: device.name,
+    online: state.online === true,
+    light: state.light || 'unknown',
+    motor: state.motor || 'unknown',
+    rgb: state.rgb || 'off',
+    last_seen: state.lastSeen || null
+  });
 });
 
 // Control helpers
-function mqttCommand(req, res, deviceId, topic, payload, type, expectedVal) {
+async function mqttCommand(req, res, topic, payload, type, expectedVal) {
+  const device = await requireOwnedDevice(req, res);
+  if (!device) return;
+
   const mqttClient = req.app.locals.mqttClient;
   const deviceState = req.app.locals.deviceState;
   mqttClient.publish(topic, payload, (err) => {
     if (err) return res.status(500).json({ error: 'Failed to publish MQTT message' });
-    if (!deviceState[deviceId]) deviceState[deviceId] = {};
-    deviceState[deviceId][type] = expectedVal;
-    res.json({ status: 'ok', device_id: deviceId, [type]: expectedVal });
+    if (!deviceState[device.id]) deviceState[device.id] = {};
+    deviceState[device.id][type] = expectedVal;
+    res.json({ status: 'ok', device_id: device.id, [type]: expectedVal });
   });
 }
 
-router.post('/:deviceId/light/on',   (req, res) => { const {deviceId} = req.params; mqttCommand(req, res, deviceId, `${deviceId}/light/command`, 'on',   'light', 'on'); });
-router.post('/:deviceId/light/off',  (req, res) => { const {deviceId} = req.params; mqttCommand(req, res, deviceId, `${deviceId}/light/command`, 'off',  'light', 'off'); });
-router.post('/:deviceId/motor/run',  (req, res) => { const {deviceId} = req.params; mqttCommand(req, res, deviceId, `${deviceId}/motor/command`, 'run',  'motor', 'running'); });
-router.post('/:deviceId/motor/stop', (req, res) => { const {deviceId} = req.params; mqttCommand(req, res, deviceId, `${deviceId}/motor/command`, 'stop', 'motor', 'stopped'); });
+router.post('/:deviceId/light/on',   authMiddleware, (req, res) => mqttCommand(req, res, `${req.params.deviceId}/light/command`, 'on',   'light', 'on'));
+router.post('/:deviceId/light/off',  authMiddleware, (req, res) => mqttCommand(req, res, `${req.params.deviceId}/light/command`, 'off',  'light', 'off'));
+router.post('/:deviceId/motor/run',  authMiddleware, (req, res) => mqttCommand(req, res, `${req.params.deviceId}/motor/command`, 'run',  'motor', 'running'));
+router.post('/:deviceId/motor/stop', authMiddleware, (req, res) => mqttCommand(req, res, `${req.params.deviceId}/motor/command`, 'stop', 'motor', 'stopped'));
 
-router.post('/:deviceId/rgb', (req, res) => {
+router.post('/:deviceId/rgb', authMiddleware, (req, res) => {
   const { deviceId } = req.params;
   const { color } = req.body;
   if (!color) return res.status(400).json({ error: 'color is required' });
-  mqttCommand(req, res, deviceId, `${deviceId}/rgb/command`, color, 'rgb', color);
+  mqttCommand(req, res, `${deviceId}/rgb/command`, color, 'rgb', color);
 });
 
-router.get('/:deviceId/light/status', (req, res) => { const s = req.app.locals.deviceState[req.params.deviceId] || {}; res.json({ device_id: req.params.deviceId, light: s.light || 'unknown' }); });
-router.get('/:deviceId/motor/status', (req, res) => { const s = req.app.locals.deviceState[req.params.deviceId] || {}; res.json({ device_id: req.params.deviceId, motor: s.motor || 'unknown' }); });
-router.get('/:deviceId/rgb/status',   (req, res) => { const s = req.app.locals.deviceState[req.params.deviceId] || {}; res.json({ device_id: req.params.deviceId, rgb: s.rgb || 'off' }); });
+const WAVE_COLORS = new Set(['red', 'green', 'blue', 'white', 'yellow', 'cyan', 'purple']);
+const MAX_WAVE_DURATION_SECONDS = 3600;
+
+// POST /devices/:deviceId/wave
+// Starts the RGB light and motor together. The device itself enforces the timeout
+// so an API restart or temporary network interruption cannot leave it running.
+router.post('/:deviceId/wave', authMiddleware, async (req, res) => {
+  const { deviceId } = req.params;
+  const {
+    color = 'white',
+    brightness = 200,
+    motorSpeed = 100,
+    durationSeconds = 0
+  } = req.body;
+
+  if (typeof color !== 'string' || !WAVE_COLORS.has(color.toLowerCase())) {
+    return res.status(400).json({ error: `color must be one of: ${[...WAVE_COLORS].join(', ')}` });
+  }
+  if (!Number.isInteger(brightness) || brightness < 0 || brightness > 255) {
+    return res.status(400).json({ error: 'brightness must be an integer from 0 to 255' });
+  }
+  if (!Number.isInteger(motorSpeed) || motorSpeed < 1 || motorSpeed > 100) {
+    return res.status(400).json({ error: 'motorSpeed must be an integer from 1 to 100' });
+  }
+  if (!Number.isInteger(durationSeconds) || durationSeconds < 0 || durationSeconds > MAX_WAVE_DURATION_SECONDS) {
+    return res.status(400).json({ error: `durationSeconds must be an integer from 0 to ${MAX_WAVE_DURATION_SECONDS}` });
+  }
+
+  const device = await requireOwnedDevice(req, res);
+  if (!device) return;
+
+  const mqttClient = req.app.locals.mqttClient;
+  if (!mqttClient.connected) {
+    return res.status(503).json({ error: 'MQTT broker is unavailable' });
+  }
+
+  const command = [
+    `color=${color.toLowerCase()}`,
+    `brightness=${brightness}`,
+    `motorSpeed=${motorSpeed}`,
+    `durationSeconds=${durationSeconds}`
+  ].join(';');
+
+  mqttClient.publish(`${deviceId}/wave/command`, command, (err) => {
+    if (err) return res.status(500).json({ error: 'Failed to publish wave command' });
+    res.json({
+      status: 'ok',
+      device_id: deviceId,
+      color: color.toLowerCase(),
+      brightness,
+      motorSpeed,
+      durationSeconds,
+      timed: durationSeconds > 0
+    });
+  });
+});
+
+// POST /devices/:deviceId/wave/stop
+router.post('/:deviceId/wave/stop', authMiddleware, async (req, res) => {
+  const { deviceId } = req.params;
+  const device = await requireOwnedDevice(req, res);
+  if (!device) return;
+
+  const mqttClient = req.app.locals.mqttClient;
+  if (!mqttClient.connected) {
+    return res.status(503).json({ error: 'MQTT broker is unavailable' });
+  }
+  mqttClient.publish(`${deviceId}/wave/command`, 'stop', (err) => {
+    if (err) return res.status(500).json({ error: 'Failed to publish wave stop command' });
+    res.json({ status: 'ok', device_id: deviceId, motor: 'stopped', rgb: 'off' });
+  });
+});
+
+router.get('/:deviceId/light/status', authMiddleware, async (req, res) => {
+  const device = await requireOwnedDevice(req, res);
+  if (!device) return;
+  const state = req.app.locals.deviceState[device.id] || {};
+  res.json({ device_id: device.id, light: state.light || 'unknown' });
+});
+router.get('/:deviceId/motor/status', authMiddleware, async (req, res) => {
+  const device = await requireOwnedDevice(req, res);
+  if (!device) return;
+  const state = req.app.locals.deviceState[device.id] || {};
+  res.json({ device_id: device.id, motor: state.motor || 'unknown' });
+});
+router.get('/:deviceId/rgb/status', authMiddleware, async (req, res) => {
+  const device = await requireOwnedDevice(req, res);
+  if (!device) return;
+  const state = req.app.locals.deviceState[device.id] || {};
+  res.json({ device_id: device.id, rgb: state.rgb || 'off' });
+});
 
 // PATCH /devices/:deviceId/name  — rename device
 router.patch('/:deviceId/name', authMiddleware, async (req, res) => {
