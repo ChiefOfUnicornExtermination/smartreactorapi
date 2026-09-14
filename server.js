@@ -73,6 +73,45 @@ async function ensureProvisionTable() {
 }
 setTimeout(() => ensureProvisionTable(), 1500);
 
+async function ensureTauchoSsoSchema() {
+  let conn;
+  try {
+    conn = await dbPool.getConnection();
+    const columns = await conn.query('SHOW COLUMNS FROM users');
+    const columnNames = new Set(columns.map(column => column.Field));
+    if (!columnNames.has('taucho_user_id')) {
+      await conn.query('ALTER TABLE users ADD COLUMN taucho_user_id VARCHAR(128) NULL');
+    }
+    if (!columnNames.has('taucho_linked_at')) {
+      await conn.query('ALTER TABLE users ADD COLUMN taucho_linked_at DATETIME NULL');
+    }
+    if (!columnNames.has('password_login_enabled')) {
+      await conn.query('ALTER TABLE users ADD COLUMN password_login_enabled TINYINT(1) NOT NULL DEFAULT 1');
+    }
+
+    const indexes = await conn.query('SHOW INDEX FROM users WHERE Key_name = ?', ['uq_users_taucho_user_id']);
+    if (!indexes.length) {
+      await conn.query('CREATE UNIQUE INDEX uq_users_taucho_user_id ON users (taucho_user_id)');
+    }
+
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS taucho_sso_assertions (
+        jti VARCHAR(128) PRIMARY KEY,
+        expires_at DATETIME NOT NULL,
+        consumed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_taucho_sso_assertions_expires_at (expires_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    await conn.query('DELETE FROM taucho_sso_assertions WHERE expires_at < UTC_TIMESTAMP()');
+    console.log('✓ Taucho SSO schema ready');
+  } catch (err) {
+    console.error('Failed to ensure Taucho SSO schema:', err.message);
+  } finally {
+    if (conn) conn.release();
+  }
+}
+setTimeout(() => ensureTauchoSsoSchema(), 2000);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MQTT
 // ─────────────────────────────────────────────────────────────────────────────
