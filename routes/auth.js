@@ -220,4 +220,48 @@ router.post('/verify', authMiddleware, (req, res) => {
   res.json({ message: 'Token is valid', user_id: req.user.user_id, email: req.user.email });
 });
 
+// GET /auth/user/check
+// Check if a user exists by email (no authentication required)
+// Used by Taucho SSO to determine if user needs registration or linking
+router.get('/user/check', async (req, res) => {
+  const { email } = req.query;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Missing email parameter' });
+  }
+
+  const emailTrimmed = String(email).trim().toLowerCase();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(emailTrimmed)) {
+    return res.status(400).json({ error: 'Invalid email format' });
+  }
+
+  let conn;
+  try {
+    conn = await req.app.locals.db.getConnection();
+    const users = await conn.query(
+      'SELECT id FROM users WHERE email = ?',
+      [emailTrimmed]
+    );
+
+    if (users.length > 0) {
+      res.json({
+        exists: true,
+        email: emailTrimmed,
+        user_id: Number(users[0].id)
+      });
+    } else {
+      res.json({
+        exists: false,
+        email: emailTrimmed
+      });
+    }
+  } catch (err) {
+    console.error('[AUTH] User check error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 module.exports = router;
