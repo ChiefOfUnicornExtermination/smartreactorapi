@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+
+# Logs and runtime files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.pid
+*.pid.lock
+
+# Test, coverage, and build output
+coverage/
+.nyc_output/
+dist/
+build/
+.cache/
+tmp/
+temp/
+
+# Local tooling
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local/reference documents not deployed with the API
+/DATABASE_SCHEMA.md
+/EXTERNAL_API.md
+/IMPLEMENTATION_STATUS.md
+/LOCAL_DEVELOPMENT_SCHEMA.sql
+/TAUCHO_SSO_SETUP.md
+/UNICORN_API_REQUIRED_CHANGES.md
