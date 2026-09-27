@@ -16,7 +16,7 @@
     "jsonwebtoken": "^8.5.1",
     "mariadb": "^3.5.3",
     "mqtt": "^5.0.0",
-    "stripe": "^15.12.0"
+    "stripe": "^17.7.0"
   },
   "engines": {
     "node": "20.x"

@@ -11,8 +11,8 @@ function generateOrderCode() {
   return code;
 }
 
-// GET /store/products  — list of products for the storefront
-router.get('/products', authMiddleware, async (req, res) => {
+// GET /store/products  — list of products for the storefront (public endpoint)
+router.get('/products', async (req, res) => {
   const db = req.app.locals.db;
   try {
     const conn = await db.getConnection();
@@ -36,8 +36,8 @@ router.get('/products', authMiddleware, async (req, res) => {
   }
 });
 
-// GET /products/:id  — product detail record
-router.get('/products/:product_id', authMiddleware, async (req, res) => {
+// GET /products/:id  — product detail record (public endpoint)
+router.get('/products/:product_id', async (req, res) => {
   const db = req.app.locals.db;
   const { product_id } = req.params;
   try {
