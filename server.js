@@ -19,6 +19,7 @@ if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
 }
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use(cors());
 
@@ -111,6 +112,39 @@ async function ensureTauchoSsoSchema() {
   }
 }
 setTimeout(() => ensureTauchoSsoSchema(), 2000);
+
+async function ensureEmailVerificationSchema() {
+  let conn;
+  try {
+    conn = await dbPool.getConnection();
+    const columns = await conn.query('SHOW COLUMNS FROM users');
+    const columnNames = new Set(columns.map(column => column.Field));
+    if (!columnNames.has('email_verified_at')) {
+      await conn.query('ALTER TABLE users ADD COLUMN email_verified_at DATETIME NULL');
+      // Accounts created before email verification existed remain usable.
+      await conn.query('UPDATE users SET email_verified_at = UTC_TIMESTAMP() WHERE email_verified_at IS NULL');
+    }
+
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS email_verification_tokens (
+        token_hash CHAR(64) PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME NOT NULL,
+        used_at DATETIME NULL,
+        INDEX idx_email_verification_tokens_user_id (user_id),
+        INDEX idx_email_verification_tokens_expires_at (expires_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    await conn.query('DELETE FROM email_verification_tokens WHERE expires_at < UTC_TIMESTAMP()');
+    console.log('✓ Email verification schema ready');
+  } catch (err) {
+    console.error('Failed to ensure email verification schema:', err.message);
+  } finally {
+    if (conn) conn.release();
+  }
+}
+setTimeout(() => ensureEmailVerificationSchema(), 2500);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MQTT
@@ -221,6 +255,7 @@ app.use('/provision', require('./routes/provision'));
 app.use('/firmware',  require('./routes/ota'));
 app.use('/store',     require('./routes/store.js'));
 app.use('/catalog',   require('./routes/catalog'));
+app.use('/contact',   require('./routes/contact'));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Health + debug
